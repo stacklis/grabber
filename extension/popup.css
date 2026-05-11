@@ -24,7 +24,7 @@ body {
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: 14px;
-  width: 320px;
+  width: 340px;
 }
 
 body {
@@ -123,6 +123,89 @@ button.secondary:hover:not(:disabled) {
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.btn-row {
+  display: flex;
+  gap: 8px;
+}
+.btn-row button#grab {
+  flex: 1;
+}
+.btn-row button#open-tab {
+  flex: 0 0 40px;
+  padding: 10px 0;
+  font-size: 14px;
+}
+
+.progress-wrap {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--input-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.progress-track {
+  height: 5px;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 999px;
+  overflow: hidden;
+  position: relative;
+}
+
+#progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+  width: 0%;
+  transition: width 200ms ease;
+  border-radius: 999px;
+}
+
+#progress-fill.indeterminate {
+  width: 35% !important;
+  transform: translateX(-100%);
+  animation: progress-march 1.4s ease-in-out infinite;
+}
+
+@keyframes progress-march {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(370%);
+  }
+}
+
+.progress-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.progress-meta .filename {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-meta .stats {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  flex-shrink: 0;
+  color: var(--accent-hover);
+}
+
+.cancel-btn {
+  font-size: 11px;
+  padding: 6px 8px;
+  margin-top: 0;
 }
 
 .footer {

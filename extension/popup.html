@@ -35,7 +35,30 @@
       </div>
     </div>
 
-    <button id="grab">Grab</button>
+    <div class="btn-row">
+      <button id="grab">Grab here</button>
+      <button
+        id="open-tab"
+        class="secondary"
+        type="button"
+        title="Open in full Grabber UI tab"
+      >
+        ↗
+      </button>
+    </div>
+
+    <div id="progress-wrap" class="progress-wrap" hidden>
+      <div class="progress-track">
+        <div id="progress-fill"></div>
+      </div>
+      <div class="progress-meta">
+        <span id="progress-filename" class="filename"></span>
+        <span id="progress-stats" class="stats"></span>
+      </div>
+      <button id="cancel" class="secondary cancel-btn" type="button">
+        Cancel
+      </button>
+    </div>
 
     <div class="footer">
       <span id="status" class="muted"></span>

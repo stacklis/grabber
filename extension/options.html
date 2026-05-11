@@ -15,11 +15,24 @@
         color: var(--muted);
         font-size: 11px;
         margin-top: 4px;
+        line-height: 1.5;
       }
       .saved {
         color: var(--success);
         font-size: 12px;
         margin-top: 8px;
+      }
+      .quick-row {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-top: 6px;
+      }
+      .quick-row button {
+        flex: 1 1 auto;
+        margin-top: 0;
+        font-size: 11px;
+        padding: 6px 8px;
       }
     </style>
   </head>
@@ -28,20 +41,28 @@
 
     <div class="field">
       <label for="server">Server URL</label>
-      <input
-        id="server"
-        type="url"
-        placeholder="http://localhost:3001"
-      />
+      <input id="server" type="url" placeholder="http://100.99.119.80:3001" />
       <div class="hint">
-        Examples: <code>http://localhost:3001</code> on the same machine,
-        <code>http://192.168.x.x:3001</code> on the LAN, or your Tailscale name
-        like <code>http://admin.tail60bd41.ts.net:3001</code>.
+        Where the grabber backend is running. Use one of:
+        <ul style="margin-top: 4px; padding-left: 16px;">
+          <li><code>http://100.99.119.80:3001</code> — Tailscale (default, works from any device on the tailnet)</li>
+          <li><code>http://localhost:3001</code> — when grabber runs on this same machine</li>
+          <li><code>http://192.168.x.x:3001</code> — local LAN IP</li>
+          <li><code>http://admin.tail60bd41.ts.net:3001</code> — Tailscale magic-DNS hostname</li>
+        </ul>
+      </div>
+      <div class="quick-row">
+        <button id="set-tailscale" class="secondary" type="button">
+          Tailscale 100.99.119.80
+        </button>
+        <button id="set-localhost" class="secondary" type="button">
+          localhost
+        </button>
       </div>
     </div>
 
     <button id="save">Save</button>
-    <div id="saved" class="saved" hidden>Saved</div>
+    <div id="saved" class="saved" hidden>Saved ✓</div>
 
     <script src="options.js"></script>
   </body>
