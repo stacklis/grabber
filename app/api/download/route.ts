@@ -1,17 +1,32 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { constants as fsConstants, existsSync, mkdirSync, readdirSync, promises as fsp } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { EventEmitter } from "node:events";
+import { randomBytes } from "node:crypto";
 import type { DownloadEvent } from "@/lib/sse-events";
+import { JOBS, makeSseStream, type JobState, type RecordedEvent } from "@/lib/job-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const HOME = os.homedir();
-const DEFAULT_OUT = path.join(HOME, "Downloads");
+const DOWNLOAD_ROOT = path.normalize(
+  process.env.GRABBER_DOWNLOAD_ROOT || path.join(HOME, "Downloads", "grabber"),
+);
 const COOKIES_DIR = path.join(process.cwd(), "cookies");
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+
+const PROCESS_TIMEOUT_MS = Number(process.env.GRABBER_PROCESS_TIMEOUT_MS) || 15 * 60_000;
+const HEARTBEAT_INTERVAL_MS = 15_000;
+const JOB_TTL_AFTER_COMPLETE_MS = 5 * 60_000;
+const EVENT_BUFFER_CAP = 500;
+
+// Env-driven binary paths take precedence over auto-discovery.
+const ENV_FFMPEG = (process.env.GRABBER_FFMPEG_PATH || "").trim();
+const ENV_YTDLP = (process.env.GRABBER_YTDLP_PATH || "").trim();
+const ENV_GALLERYDL = (process.env.GRABBER_GALLERYDL_PATH || "").trim();
 
 const FFMPEG_DIR_FALLBACK = "C:\\ffmpeg\\bin";
 const FFMPEG_DIR_CANDIDATES: readonly string[] = [
@@ -20,7 +35,24 @@ const FFMPEG_DIR_CANDIDATES: readonly string[] = [
   path.join(HOME, "ffmpeg", "bin"),
 ];
 
+const YTDLP_CANDIDATES: readonly string[] = [
+  path.join(HOME, "yt-dlp.exe"),
+  path.join(HOME, ".local", "bin", "yt-dlp.exe"),
+  path.join(HOME, "Downloads", "yt-dlp.exe"),
+  "C:\\ffmpeg\\bin\\yt-dlp.exe",
+  "C:\\Program Files\\yt-dlp\\yt-dlp.exe",
+  "C:\\ProgramData\\chocolatey\\bin\\yt-dlp.exe",
+];
+
+const GALLERY_DL_CANDIDATES: readonly string[] = [
+  path.join(HOME, ".local", "bin", "gallery-dl.exe"),
+  path.join(HOME, "gallery-dl.exe"),
+  path.join(HOME, "Downloads", "gallery-dl.exe"),
+  "C:\\Program Files\\gallery-dl\\gallery-dl.exe",
+];
+
 function findFfmpegDir(): string {
+  if (ENV_FFMPEG && existsSync(ENV_FFMPEG)) return path.normalize(path.dirname(ENV_FFMPEG));
   for (const dir of FFMPEG_DIR_CANDIDATES) {
     if (existsSync(path.join(dir, "ffmpeg.exe"))) return path.normalize(dir);
   }
@@ -42,7 +74,6 @@ function findCookiesFile(url: string): string | null {
     return null;
   }
   if (!files.length) return null;
-  // Prefer a filename that matches the hostname (e.g. noodlemagazine.txt)
   const match = files.find((f) => {
     const stem = f.replace(/\.txt$/i, "").toLowerCase();
     return stem && (host === stem || host.endsWith("." + stem) || host.includes(stem));
@@ -55,22 +86,6 @@ function cookieArgs(url: string): string[] {
   if (file) return ["--cookies", file];
   return ["--cookies-from-browser", "firefox"];
 }
-
-const YTDLP_CANDIDATES: readonly string[] = [
-  path.join(HOME, "yt-dlp.exe"),
-  path.join(HOME, ".local", "bin", "yt-dlp.exe"),
-  path.join(HOME, "Downloads", "yt-dlp.exe"),
-  "C:\\ffmpeg\\bin\\yt-dlp.exe",
-  "C:\\Program Files\\yt-dlp\\yt-dlp.exe",
-  "C:\\ProgramData\\chocolatey\\bin\\yt-dlp.exe",
-];
-
-const GALLERY_DL_CANDIDATES: readonly string[] = [
-  path.join(HOME, ".local", "bin", "gallery-dl.exe"),
-  path.join(HOME, "gallery-dl.exe"),
-  path.join(HOME, "Downloads", "gallery-dl.exe"),
-  "C:\\Program Files\\gallery-dl\\gallery-dl.exe",
-];
 
 function resolveBinary(name: string, candidates: readonly string[]): string | null {
   for (const c of candidates) {
@@ -91,17 +106,21 @@ function resolveBinary(name: string, candidates: readonly string[]): string | nu
   return null;
 }
 
-let ytdlpResolved: string | null = null;
-let galleryDlResolved: string | null = null;
+// One-time module-load resolution; falls back to per-call if a binary moves.
+const YTDLP_BIN: string | null =
+  (ENV_YTDLP && existsSync(ENV_YTDLP) ? ENV_YTDLP : null) ||
+  resolveBinary("yt-dlp", YTDLP_CANDIDATES);
+const GALLERYDL_BIN: string | null =
+  (ENV_GALLERYDL && existsSync(ENV_GALLERYDL) ? ENV_GALLERYDL : null) ||
+  resolveBinary("gallery-dl", GALLERY_DL_CANDIDATES);
+
 function getYtdlp(): string | null {
-  if (ytdlpResolved && existsSync(ytdlpResolved)) return ytdlpResolved;
-  ytdlpResolved = resolveBinary("yt-dlp", YTDLP_CANDIDATES);
-  return ytdlpResolved;
+  if (YTDLP_BIN && existsSync(YTDLP_BIN)) return YTDLP_BIN;
+  return resolveBinary("yt-dlp", YTDLP_CANDIDATES);
 }
 function getGalleryDl(): string | null {
-  if (galleryDlResolved && existsSync(galleryDlResolved)) return galleryDlResolved;
-  galleryDlResolved = resolveBinary("gallery-dl", GALLERY_DL_CANDIDATES);
-  return galleryDlResolved;
+  if (GALLERYDL_BIN && existsSync(GALLERYDL_BIN)) return GALLERYDL_BIN;
+  return resolveBinary("gallery-dl", GALLERY_DL_CANDIDATES);
 }
 
 type Quality = "best" | "1080p" | "720p" | "480p" | "audio";
@@ -115,6 +134,19 @@ function isQuality(v: unknown): v is Quality {
 }
 function isTool(v: unknown): v is Tool {
   return typeof v === "string" && TOOLS.has(v as Tool);
+}
+
+/** Resolve user-supplied folder under DOWNLOAD_ROOT. Returns null on escape. */
+function resolveSafeOutputFolder(input: unknown): string | null {
+  const raw = typeof input === "string" && input.trim() ? input.trim() : "";
+  // Empty / unspecified → land in DOWNLOAD_ROOT itself.
+  const resolved = raw ? path.resolve(DOWNLOAD_ROOT, raw) : DOWNLOAD_ROOT;
+  const normalized = path.normalize(resolved);
+  const root = path.normalize(DOWNLOAD_ROOT);
+  if (normalized !== root && !normalized.startsWith(root + path.sep)) {
+    return null;
+  }
+  return normalized;
 }
 
 const GALLERY_HOSTS: readonly string[] = [
@@ -173,8 +205,6 @@ const GALLERY_HOSTS: readonly string[] = [
   "members.luscious.net",
 ];
 
-// Hosts that benefit from gallery-dl for /thread/ or gallery-style URLs but use yt-dlp for video pages.
-// Returns "gallery-dl" if URL pathname looks gallery-ish, otherwise null (let default rules apply).
 function urlPrefersGallery(url: string): "gallery-dl" | null {
   try {
     const u = new URL(url);
@@ -227,8 +257,6 @@ function ytdlpArgs(url: string, quality: Quality, outDir: string, opts: YtdlpOpt
     return [...common, "-x", "--audio-format", "mp3", "--audio-quality", "0", "-o", out, url];
   }
 
-  // HLS-friendly format chain: prefer mp4+m4a (direct merge), fall back to any
-  // bestvideo+bestaudio combo, then to a single combined "best" stream.
   let format: string;
   switch (quality) {
     case "1080p":
@@ -253,7 +281,6 @@ function ytdlpArgs(url: string, quality: Quality, outDir: string, opts: YtdlpOpt
 
 function galleryArgs(url: string, outDir: string): string[] {
   const args = ["-D", outDir, "--user-agent", USER_AGENT];
-  // gallery-dl uses different flags than yt-dlp for cookies
   const file = findCookiesFile(url);
   if (file) {
     args.push("--cookies", file);
@@ -307,12 +334,261 @@ function lineBuffer(onLine: (line: string) => void): (chunk: Buffer | string) =>
   };
 }
 
+function newJobId(): string {
+  return randomBytes(8).toString("hex");
+}
+
+function recordEvent(job: JobState, event: DownloadEvent): void {
+  const ts = Date.now();
+  const rec: RecordedEvent = { ts, event };
+  job.events.push(rec);
+  if (job.events.length > EVENT_BUFFER_CAP) {
+    job.events.splice(0, job.events.length - EVENT_BUFFER_CAP);
+  }
+  job.lastEventTs = ts;
+  job.emitter.emit("event", rec);
+}
+
+function completeJob(job: JobState): void {
+  if (job.completed) return;
+  job.completed = true;
+  setTimeout(() => {
+    JOBS.delete(job.jobId);
+  }, JOB_TTL_AFTER_COMPLETE_MS);
+}
+
+async function cleanupPartialFile(outDir: string, filename: string): Promise<void> {
+  if (!filename) return;
+  // Best-effort: try both the recorded filename and the .part variant yt-dlp uses.
+  const candidates = [
+    path.join(outDir, filename),
+    path.join(outDir, filename + ".part"),
+  ];
+  for (const c of candidates) {
+    try {
+      await fsp.unlink(c);
+    } catch {
+      /* ignore — may not exist or already cleaned */
+    }
+  }
+}
+
 type RequestBody = {
   url?: unknown;
   quality?: unknown;
   outputFolder?: unknown;
   tool?: unknown;
   playlist?: unknown;
+};
+
+function startJob(params: {
+  url: string;
+  quality: Quality;
+  tool: Tool;
+  playlist: boolean;
+  outDir: string;
+}): { job: JobState } | { error: string; status: number } {
+  const { url, quality, tool, playlist, outDir } = params;
+  const chosenTool: "yt-dlp" | "gallery-dl" = tool === "auto" ? detectTool(url) : tool;
+  const ffmpegDir = findFfmpegDir();
+
+  let bin: string | null;
+  let args: string[];
+  if (chosenTool === "gallery-dl") {
+    bin = getGalleryDl();
+    if (!bin) {
+      return {
+        status: 500,
+        error: `gallery-dl not found. Looked in:\n${GALLERY_DL_CANDIDATES.join("\n")}\nand on PATH. Set GRABBER_GALLERYDL_PATH or install gallery-dl.`,
+      };
+    }
+    args = galleryArgs(url, outDir);
+  } else {
+    bin = getYtdlp();
+    if (!bin) {
+      return {
+        status: 500,
+        error: `yt-dlp not found. Looked in:\n${YTDLP_CANDIDATES.join("\n")}\nand on PATH. Set GRABBER_YTDLP_PATH or install yt-dlp.`,
+      };
+    }
+    args = ytdlpArgs(url, quality, outDir, { playlist, ffmpegDir });
+  }
+
+  let child: ChildProcessWithoutNullStreams;
+  try {
+    child = spawn(bin, args, { windowsHide: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { status: 500, error: `Failed to start ${chosenTool}: ${msg}` };
+  }
+
+  const jobId = newJobId();
+  const job: JobState = {
+    jobId,
+    child,
+    events: [],
+    lastEventTs: 0,
+    startedAt: Date.now(),
+    completed: false,
+    emitter: new EventEmitter(),
+    outDir,
+    currentFilename: "",
+    tool: chosenTool,
+  };
+  // Allow many concurrent resume subscribers without warnings.
+  job.emitter.setMaxListeners(50);
+  JOBS.set(jobId, job);
+
+  recordEvent(job, {
+    type: "status",
+    message: `Launching ${chosenTool} (${bin})`,
+    tool: chosenTool,
+  });
+
+  // Subprocess timeout: SIGTERM then SIGKILL.
+  const timeoutHandle = setTimeout(() => {
+    if (!child.killed && !job.completed) {
+      recordEvent(job, {
+        type: "error",
+        message: `Timeout after ${Math.round(PROCESS_TIMEOUT_MS / 1000)}s — killing process`,
+      });
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
+      setTimeout(() => {
+        if (!child.killed) {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            /* ignore */
+          }
+        }
+      }, 5_000);
+    }
+  }, PROCESS_TIMEOUT_MS);
+
+  // Heartbeat ping so phone browsers don't time out the connection during
+  // long-quiet phases (e.g. gallery-dl scraping pages, yt-dlp HLS merging).
+  const heartbeat = setInterval(() => {
+    if (job.completed) return;
+    recordEvent(job, { type: "heartbeat", ts: Date.now() });
+  }, HEARTBEAT_INTERVAL_MS);
+
+  let lastErrLine = "";
+  let galleryCount = 0;
+
+  const handleYtdlpLine = (line: string): void => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    const dest = parseDestination(trimmed);
+    if (dest) {
+      job.currentFilename = path.basename(dest);
+      recordEvent(job, {
+        type: "status",
+        message: `Downloading ${job.currentFilename}`,
+        filename: job.currentFilename,
+        path: dest,
+      });
+      return;
+    }
+    const prog = parseYtdlpProgress(trimmed);
+    if (prog) {
+      recordEvent(job, { type: "progress", ...prog, filename: job.currentFilename });
+      return;
+    }
+    if (
+      trimmed.startsWith("[Merger]") ||
+      trimmed.startsWith("[ExtractAudio]") ||
+      trimmed.startsWith("[ffmpeg]")
+    ) {
+      recordEvent(job, { type: "status", message: trimmed });
+    }
+  };
+
+  const handleGalleryLine = (line: string): void => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    if (/^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith("/")) {
+      galleryCount++;
+      job.currentFilename = path.basename(trimmed);
+      recordEvent(job, {
+        type: "progress",
+        indeterminate: true,
+        filename: job.currentFilename,
+        path: trimmed,
+        count: galleryCount,
+      });
+      return;
+    }
+    if (trimmed.startsWith("# ") || trimmed.startsWith("* ")) {
+      recordEvent(job, { type: "status", message: trimmed });
+    }
+  };
+
+  const onLine = chosenTool === "gallery-dl" ? handleGalleryLine : handleYtdlpLine;
+
+  child.stdout.on("data", lineBuffer(onLine));
+  child.stderr.on(
+    "data",
+    lineBuffer((line) => {
+      const t = line.trim();
+      if (!t) return;
+      lastErrLine = t;
+      if (/^ERROR/i.test(t) || /\[error\]/i.test(t)) {
+        recordEvent(job, { type: "error", message: t });
+      }
+    }),
+  );
+
+  let spawnError: Error | null = null;
+  child.on("error", (err) => {
+    spawnError = err;
+    recordEvent(job, {
+      type: "error",
+      message: `Failed to start ${chosenTool}: ${err.message} (path: ${bin})`,
+    });
+  });
+
+  child.on("close", (code) => {
+    clearTimeout(timeoutHandle);
+    clearInterval(heartbeat);
+
+    if (spawnError) {
+      completeJob(job);
+      return;
+    }
+    if (code === 0) {
+      recordEvent(job, {
+        type: "done",
+        message:
+          chosenTool === "gallery-dl"
+            ? `Saved ${galleryCount} file${galleryCount === 1 ? "" : "s"} to ${outDir}`
+            : `Saved to ${outDir}`,
+        filename: job.currentFilename,
+        outputFolder: outDir,
+        count: chosenTool === "gallery-dl" ? galleryCount : 1,
+      });
+    } else {
+      // Clean up partial file (yt-dlp leaves .part on abort/error).
+      void cleanupPartialFile(outDir, job.currentFilename);
+      recordEvent(job, {
+        type: "error",
+        message: lastErrLine || `${chosenTool} exited with code ${code}`,
+      });
+    }
+    completeJob(job);
+  });
+
+  return { job };
+}
+
+const SSE_HEADERS: Record<string, string> = {
+  "Content-Type": "text/event-stream; charset=utf-8",
+  "Cache-Control": "no-cache, no-transform",
+  Connection: "keep-alive",
+  "X-Accel-Buffering": "no",
 };
 
 export async function POST(req: Request): Promise<Response> {
@@ -326,7 +602,6 @@ export async function POST(req: Request): Promise<Response> {
   const url = body.url;
   const rawQuality = body.quality ?? "best";
   const rawTool = body.tool ?? "auto";
-  const outputFolder = body.outputFolder;
   const playlist = Boolean(body.playlist);
 
   if (typeof url !== "string" || !/^https?:\/\//i.test(url)) {
@@ -338,12 +613,14 @@ export async function POST(req: Request): Promise<Response> {
   if (!isTool(rawTool)) {
     return new Response("Invalid tool", { status: 400 });
   }
-  const quality: Quality = rawQuality;
-  const tool: Tool = rawTool;
 
-  const rawOut =
-    typeof outputFolder === "string" && outputFolder.trim() ? outputFolder.trim() : DEFAULT_OUT;
-  const outDir = path.normalize(rawOut);
+  const outDir = resolveSafeOutputFolder(body.outputFolder);
+  if (!outDir) {
+    return new Response(
+      `outputFolder must resolve under GRABBER_DOWNLOAD_ROOT (${DOWNLOAD_ROOT}).`,
+      { status: 400 },
+    );
+  }
 
   try {
     mkdirSync(outDir, { recursive: true });
@@ -351,202 +628,19 @@ export async function POST(req: Request): Promise<Response> {
     const msg = err instanceof Error ? err.message : String(err);
     return new Response(`Cannot create output folder: ${msg}`, { status: 400 });
   }
-
-  const chosenTool: "yt-dlp" | "gallery-dl" = tool === "auto" ? detectTool(url) : tool;
-  const ffmpegDir = findFfmpegDir();
-
-  let bin: string | null;
-  let args: string[];
-  if (chosenTool === "gallery-dl") {
-    bin = getGalleryDl();
-    if (!bin) {
-      return new Response(
-        `gallery-dl not found. Looked in:\n${GALLERY_DL_CANDIDATES.join("\n")}\nand on PATH. Install gallery-dl or place it at one of these paths.`,
-        { status: 500 },
-      );
-    }
-    args = galleryArgs(url, outDir);
-  } else {
-    bin = getYtdlp();
-    if (!bin) {
-      return new Response(
-        `yt-dlp not found. Looked in:\n${YTDLP_CANDIDATES.join("\n")}\nand on PATH. Install yt-dlp or place it at one of these paths.`,
-        { status: 500 },
-      );
-    }
-    args = ytdlpArgs(url, quality, outDir, { playlist, ffmpegDir });
+  try {
+    await fsp.access(outDir, fsConstants.W_OK);
+  } catch {
+    return new Response(`Output folder not writable: ${outDir}`, { status: 400 });
   }
-  const resolvedBin: string = bin;
 
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const enc = new TextEncoder();
-      let closed = false;
-      const send = (obj: DownloadEvent): void => {
-        if (closed) return;
-        try {
-          controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
-        } catch {
-          closed = true;
-        }
-      };
-      const close = (): void => {
-        if (closed) return;
-        closed = true;
-        try {
-          controller.close();
-        } catch {
-          /* ignore */
-        }
-      };
+  const started = startJob({ url, quality: rawQuality, tool: rawTool, playlist, outDir });
+  if ("error" in started) {
+    return new Response(started.error, { status: started.status });
+  }
+  const { job } = started;
 
-      send({
-        type: "status",
-        message: `Launching ${chosenTool} (${resolvedBin})`,
-        tool: chosenTool,
-      });
-
-      let child: ChildProcessWithoutNullStreams;
-      try {
-        child = spawn(resolvedBin, args, { windowsHide: true });
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        send({ type: "error", message: `Failed to start ${chosenTool}: ${msg}` });
-        close();
-        return;
-      }
-
-      let lastErrLine = "";
-      let currentFilename = "";
-      let galleryCount = 0;
-
-      const handleYtdlpLine = (line: string): void => {
-        const trimmed = line.trim();
-        if (!trimmed) return;
-
-        const dest = parseDestination(trimmed);
-        if (dest) {
-          currentFilename = path.basename(dest);
-          send({
-            type: "status",
-            message: `Downloading ${currentFilename}`,
-            filename: currentFilename,
-            path: dest,
-          });
-          return;
-        }
-
-        const prog = parseYtdlpProgress(trimmed);
-        if (prog) {
-          send({
-            type: "progress",
-            ...prog,
-            filename: currentFilename,
-          });
-          return;
-        }
-
-        if (
-          trimmed.startsWith("[Merger]") ||
-          trimmed.startsWith("[ExtractAudio]") ||
-          trimmed.startsWith("[ffmpeg]")
-        ) {
-          send({ type: "status", message: trimmed });
-        }
-      };
-
-      const handleGalleryLine = (line: string): void => {
-        const trimmed = line.trim();
-        if (!trimmed) return;
-
-        if (/^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith("/")) {
-          galleryCount++;
-          currentFilename = path.basename(trimmed);
-          send({
-            type: "progress",
-            indeterminate: true,
-            filename: currentFilename,
-            path: trimmed,
-            count: galleryCount,
-          });
-          return;
-        }
-        if (trimmed.startsWith("# ") || trimmed.startsWith("* ")) {
-          send({ type: "status", message: trimmed });
-        }
-      };
-
-      const onLine = chosenTool === "gallery-dl" ? handleGalleryLine : handleYtdlpLine;
-
-      child.stdout.on("data", lineBuffer(onLine));
-      child.stderr.on(
-        "data",
-        lineBuffer((line) => {
-          const t = line.trim();
-          if (!t) return;
-          lastErrLine = t;
-          if (/^ERROR/i.test(t) || /\[error\]/i.test(t)) {
-            send({ type: "error", message: t });
-          }
-        }),
-      );
-
-      let spawnError: Error | null = null;
-      child.on("error", (err) => {
-        spawnError = err;
-        send({
-          type: "error",
-          message: `Failed to start ${chosenTool}: ${err.message} (path: ${resolvedBin})`,
-        });
-        setTimeout(() => {
-          if (!closed) close();
-        }, 250);
-      });
-
-      child.on("close", (code) => {
-        if (spawnError) {
-          close();
-          return;
-        }
-        if (code === 0) {
-          send({
-            type: "done",
-            message:
-              chosenTool === "gallery-dl"
-                ? `Saved ${galleryCount} file${galleryCount === 1 ? "" : "s"} to ${outDir}`
-                : `Saved to ${outDir}`,
-            filename: currentFilename,
-            outputFolder: outDir,
-            count: chosenTool === "gallery-dl" ? galleryCount : 1,
-          });
-        } else {
-          send({
-            type: "error",
-            message: lastErrLine || `${chosenTool} exited with code ${code}`,
-          });
-        }
-        close();
-      });
-
-      const abort = (): void => {
-        if (child && !child.killed) {
-          try {
-            child.kill();
-          } catch {
-            /* ignore */
-          }
-        }
-      };
-      req.signal.addEventListener("abort", abort);
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
-    },
+  return new Response(makeSseStream(job, 0), {
+    headers: { ...SSE_HEADERS, "X-Grabber-Job-Id": job.jobId },
   });
 }

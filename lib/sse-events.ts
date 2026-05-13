@@ -31,4 +31,21 @@ export type ErrorEvent = {
   message: string;
 };
 
-export type DownloadEvent = StatusEvent | ProgressEvent | DoneEvent | ErrorEvent;
+export type HeartbeatEvent = {
+  type: "heartbeat";
+  /** server-side wall-clock at heartbeat emission */
+  ts: number;
+};
+
+export type QueuedEvent = {
+  type: "queued";
+  position: number;
+};
+
+export type DownloadEvent =
+  | StatusEvent
+  | ProgressEvent
+  | DoneEvent
+  | ErrorEvent
+  | HeartbeatEvent
+  | QueuedEvent;

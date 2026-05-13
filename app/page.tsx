@@ -2,9 +2,17 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { DownloadEvent } from "@/lib/sse-events";
+import { withConcurrencyLimit } from "@/lib/queue";
 import "./globals.css";
 
-const DEFAULT_OUT = "C:\\Users\\jared\\Downloads";
+// Empty means "land in GRABBER_DOWNLOAD_ROOT itself". The server resolves
+// user input under that root and rejects escapes.
+const DEFAULT_OUT = "";
+
+const MAX_CONCURRENT = 4;
+// If we haven't seen any event (including heartbeat) for this long while
+// the tab was hidden, assume the stream is dead and reconnect.
+const STALE_MS = 35_000;
 
 type Quality = "best" | "1080p" | "720p" | "480p" | "audio";
 type Tool = "auto" | "yt-dlp" | "gallery-dl";
@@ -43,6 +51,12 @@ type DownloadItem = {
   error: string;
   count?: number;
   abort?: AbortController;
+  jobId?: string;
+  lastEventTs: number;
+  /** Wall-clock ms when we last received any event. Used to detect dead streams. */
+  lastReceivedAt: number;
+  /** True between abort-for-reconnect and the next reader replacing it. */
+  reconnecting?: boolean;
 };
 
 type HistoryEntry = {
@@ -90,7 +104,7 @@ export default function Home(): React.ReactNode {
       const q = localStorage.getItem(QUALITY_KEY);
       if (q && isQuality(q)) setQuality(q);
       const f = localStorage.getItem(FOLDER_KEY);
-      if (f) setFolder(f);
+      if (f !== null) setFolder(f);
       const t = localStorage.getItem(TOOL_KEY);
       if (t && isTool(t)) setTool(t);
       const p = localStorage.getItem(PLAYLIST_KEY);
@@ -153,6 +167,26 @@ export default function Home(): React.ReactNode {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Tab-visibility resume: on mobile, backgrounding a tab stalls (and
+  // sometimes silently kills) the SSE reader. When we come back, any
+  // item that is `active` but hasn't received an event recently gets a
+  // fresh resume connection — the server kept the job alive and buffered
+  // events past lastEventTs.
+  useEffect(() => {
+    const onVisible = (): void => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      for (const it of itemsRef.current) {
+        if (it.status !== "active" || !it.jobId) continue;
+        if (now - it.lastReceivedAt < STALE_MS) continue;
+        reconnectItem(it);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function updateItem(id: string, patch: Partial<DownloadItem>): void {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
   }
@@ -169,9 +203,102 @@ export default function Home(): React.ReactNode {
     });
   }
 
+  /** Drive a SSE response stream and apply events to the item. */
+  async function consumeStream(item: DownloadItem, res: Response): Promise<void> {
+    if (!res.body) throw new Error("Response has no body");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const events = buf.split("\n\n");
+      buf = events.pop() || "";
+      for (const evt of events) {
+        const lines = evt.split("\n");
+        let idVal = 0;
+        let dataStr = "";
+        for (const ln of lines) {
+          if (ln.startsWith("id: ")) idVal = parseInt(ln.slice(4), 10) || 0;
+          else if (ln.startsWith("data: ")) dataStr = ln.slice(6);
+        }
+        if (!dataStr) continue;
+        let payload: DownloadEvent;
+        try {
+          payload = JSON.parse(dataStr) as DownloadEvent;
+        } catch {
+          continue;
+        }
+        if (idVal > 0) {
+          updateItem(item.id, { lastEventTs: idVal, lastReceivedAt: Date.now() });
+        } else {
+          updateItem(item.id, { lastReceivedAt: Date.now() });
+        }
+        applyEvent(item, payload);
+      }
+    }
+  }
+
+  function applyEvent(item: DownloadItem, payload: DownloadEvent): void {
+    if (payload.type === "heartbeat") return;
+    if (payload.type === "queued") {
+      updateItem(item.id, { statusMsg: `Queued (#${payload.position})` });
+      return;
+    }
+    if (payload.type === "progress") {
+      updateItem(item.id, {
+        percent: payload.percent ?? null,
+        indeterminate: !!payload.indeterminate,
+        speed: payload.speed || "",
+        eta: payload.eta || "",
+        size: payload.size || "",
+        filename: payload.filename || "",
+        count: payload.count,
+      });
+      return;
+    }
+    if (payload.type === "status") {
+      updateItem(item.id, {
+        statusMsg: payload.message || "",
+        filename: payload.filename || undefined,
+        tool: (payload.tool && isTool(payload.tool) ? payload.tool : undefined) as
+          | Tool
+          | undefined,
+      });
+      return;
+    }
+    if (payload.type === "done") {
+      updateItem(item.id, {
+        status: "done",
+        percent: 100,
+        statusMsg: payload.message || "Done",
+        filename: payload.filename || "",
+      });
+      pushHistory({
+        id: item.id,
+        url: item.url,
+        filename: payload.filename || "",
+        size: payload.count ? `${payload.count} file${payload.count === 1 ? "" : "s"}` : "",
+        folder: payload.outputFolder || item.folder,
+        timestamp: Date.now(),
+      });
+      return;
+    }
+    if (payload.type === "error") {
+      updateItem(item.id, { status: "error", error: payload.message || "Error" });
+      return;
+    }
+  }
+
   async function runOne(item: DownloadItem): Promise<void> {
     const ctrl = new AbortController();
-    updateItem(item.id, { status: "active", abort: ctrl, error: "" });
+    updateItem(item.id, {
+      status: "active",
+      abort: ctrl,
+      error: "",
+      lastReceivedAt: Date.now(),
+    });
     try {
       const res = await fetch("/api/download", {
         method: "POST",
@@ -185,90 +312,93 @@ export default function Home(): React.ReactNode {
         }),
         signal: ctrl.signal,
       });
-      if (!res.ok || !res.body) {
+      if (!res.ok) {
         const t = await res.text().catch(() => "");
         throw new Error(t || `Request failed (${res.status})`);
       }
+      const jobId = res.headers.get("X-Grabber-Job-Id") || undefined;
+      if (jobId) updateItem(item.id, { jobId });
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
+      await consumeStream(item, res);
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const events = buf.split("\n\n");
-        buf = events.pop() || "";
-        for (const evt of events) {
-          const line = evt.split("\n").find((l) => l.startsWith("data: "));
-          if (!line) continue;
-          let payload: DownloadEvent;
-          try {
-            payload = JSON.parse(line.slice(6)) as DownloadEvent;
-          } catch {
-            continue;
-          }
-          if (payload.type === "progress") {
-            updateItem(item.id, {
-              percent: payload.percent ?? null,
-              indeterminate: !!payload.indeterminate,
-              speed: payload.speed || "",
-              eta: payload.eta || "",
-              size: payload.size || "",
-              filename: payload.filename || "",
-              count: payload.count,
-            });
-          } else if (payload.type === "status") {
-            updateItem(item.id, {
-              statusMsg: payload.message || "",
-              filename: payload.filename || undefined,
-              tool: (payload.tool && isTool(payload.tool) ? payload.tool : undefined) as
-                | Tool
-                | undefined,
-            });
-          } else if (payload.type === "done") {
-            updateItem(item.id, {
-              status: "done",
-              percent: 100,
-              statusMsg: payload.message || "Done",
-              filename: payload.filename || "",
-            });
-            pushHistory({
-              id: item.id,
-              url: item.url,
-              filename: payload.filename || "",
-              size: payload.count
-                ? `${payload.count} file${payload.count === 1 ? "" : "s"}`
-                : item.size || "",
-              folder: payload.outputFolder || item.folder,
-              timestamp: Date.now(),
-            });
-          } else if (payload.type === "error") {
-            updateItem(item.id, {
-              status: "error",
-              error: payload.message || "Error",
-            });
-          }
-        }
-      }
-
-      // stream ended without explicit done/error? mark errored if still active
+      // Stream ended without explicit done/error — only mark error if still active
+      // and not in the middle of a reconnect handoff.
       const cur = itemsRef.current.find((x) => x.id === item.id);
-      if (cur && cur.status === "active") {
+      if (cur && cur.status === "active" && !cur.reconnecting) {
+        // Try one reconnect before giving up — server may still have the job alive.
+        if (cur.jobId) {
+          reconnectItem(cur);
+          return;
+        }
         updateItem(item.id, { status: "error", error: "Stream ended unexpectedly" });
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       const name = err instanceof Error ? err.name : "";
       if (name === "AbortError") {
+        const cur = itemsRef.current.find((x) => x.id === item.id);
+        if (cur?.reconnecting) {
+          // Replaced by resumeItem — swallow.
+          return;
+        }
         updateItem(item.id, { status: "error", error: "Cancelled" });
       } else {
-        updateItem(item.id, {
-          status: "error",
-          error: msg || "Error",
-        });
+        updateItem(item.id, { status: "error", error: msg || "Error" });
       }
+    }
+  }
+
+  function reconnectItem(item: DownloadItem): void {
+    if (!item.jobId) return;
+    updateItem(item.id, { reconnecting: true });
+    if (item.abort) {
+      try {
+        item.abort.abort();
+      } catch {
+        /* ignore */
+      }
+    }
+    queueMicrotask(() => {
+      void resumeItem(item);
+    });
+  }
+
+  async function resumeItem(item: DownloadItem): Promise<void> {
+    if (!item.jobId) return;
+    const ctrl = new AbortController();
+    const sinceTs = item.lastEventTs || 0;
+    updateItem(item.id, {
+      abort: ctrl,
+      reconnecting: false,
+      lastReceivedAt: Date.now(),
+    });
+    try {
+      const res = await fetch(
+        `/api/download/resume?jobId=${encodeURIComponent(item.jobId)}&sinceTs=${sinceTs}`,
+        { signal: ctrl.signal },
+      );
+      if (!res.ok) {
+        if (res.status === 404) {
+          // Job already cleaned up server-side; mark done if it likely finished.
+          updateItem(item.id, {
+            status: "error",
+            error: "Reconnect: job expired (may have completed while away)",
+          });
+          return;
+        }
+        const t = await res.text().catch(() => "");
+        throw new Error(t || `Resume failed (${res.status})`);
+      }
+      await consumeStream(item, res);
+    } catch (err: unknown) {
+      const name = err instanceof Error ? err.name : "";
+      const msg = err instanceof Error ? err.message : String(err);
+      if (name === "AbortError") {
+        const cur = itemsRef.current.find((x) => x.id === item.id);
+        if (cur?.reconnecting) return;
+      }
+      // Don't aggressively error — the next visibilitychange may retry.
+      console.warn("resume error:", msg);
     }
   }
 
@@ -289,11 +419,16 @@ export default function Home(): React.ReactNode {
       filename: "",
       statusMsg: "Queued",
       error: "",
+      lastEventTs: 0,
+      lastReceivedAt: 0,
     }));
     setItems((prev) => [...newItems, ...prev]);
-    for (const it of newItems) {
-      void runOne(it);
-    }
+    // Concurrency cap: run at most MAX_CONCURRENT runOne()s at a time.
+    // Beyond cap, items sit with status="queued" until a slot opens.
+    void withConcurrencyLimit(
+      MAX_CONCURRENT,
+      newItems.map((it) => () => runOne(it)),
+    );
   }
 
   function onSubmit(e: React.FormEvent<HTMLFormElement>): void {
@@ -305,7 +440,7 @@ export default function Home(): React.ReactNode {
   }
 
   function onRetry(item: DownloadItem): void {
-    void runOne({ ...item });
+    void runOne({ ...item, lastEventTs: 0, lastReceivedAt: 0 });
   }
 
   function onCancel(item: DownloadItem): void {
@@ -391,13 +526,15 @@ export default function Home(): React.ReactNode {
           </div>
 
           <div className="field">
-            <label htmlFor="folder">Output folder</label>
+            <label htmlFor="folder">
+              Output subfolder <span className="muted">(under GRABBER_DOWNLOAD_ROOT)</span>
+            </label>
             <input
               id="folder"
               type="text"
               value={folder}
               onChange={(e) => setFolder(e.target.value)}
-              placeholder={DEFAULT_OUT}
+              placeholder="e.g. videos/youtube — empty = root"
             />
           </div>
 
