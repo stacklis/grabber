@@ -5,20 +5,23 @@
 }
 
 :root {
+  /* Stacklis palette — cyan accent + rust alt + terminal-cool surface tones. */
   --bg: #0a0a0a;
-  --card: #141414;
-  --card-border: #1f1f1f;
-  --input-bg: #0d0d0d;
-  --input-border: #2a2a2a;
-  --input-border-focus: #7c3aed;
+  --card: #0f1419;
+  --card-border: #1a2530;
+  --input-bg: #0a0f14;
+  --input-border: #1f3040;
+  --input-border-focus: #00d9ff;
   --text: #e6e6e6;
-  --muted: #6b6b6b;
-  --muted-2: #888;
-  --accent: #7c3aed;
-  --accent-hover: #8b5cf6;
-  --accent-soft: rgba(124, 58, 237, 0.15);
-  --error: #f87171;
-  --success: #34d399;
+  --muted: #6b7785;
+  --muted-2: #8a96a3;
+  --accent: #00d9ff;
+  --accent-hover: #1ae0ff;
+  --accent-soft: rgba(0, 217, 255, 0.12);
+  --accent-glow: rgba(0, 217, 255, 0.35);
+  --accent-alt: #d96346;
+  --error: #ff5e5b;
+  --success: #5eead4;
 }
 
 html,
@@ -26,9 +29,10 @@ body {
   height: 100%;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
-    Ubuntu, sans-serif;
-  font-size: 14px;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+  /* Bumped 14 → 16 for phone legibility. */
+  font-size: 16px;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -48,6 +52,18 @@ main {
   border: 1px solid var(--card-border);
   border-radius: 12px;
   padding: 24px;
+  animation: cardFadeIn 240ms ease-out;
+}
+
+@keyframes cardFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 header {
@@ -55,7 +71,7 @@ header {
 }
 
 .title {
-  font-size: 22px;
+  font-size: 26px;
   font-weight: 700;
   letter-spacing: -0.01em;
   background: linear-gradient(180deg, #fff 0%, var(--accent) 200%);
@@ -63,11 +79,13 @@ header {
   background-clip: text;
   -webkit-text-fill-color: transparent;
   margin-bottom: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 .subtitle {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 form {
@@ -89,7 +107,8 @@ form {
 }
 
 label {
-  font-size: 10px;
+  /* 10 → 12 for readability on phone. */
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.8px;
   color: var(--muted-2);
@@ -100,7 +119,7 @@ label.checkbox {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: 14px;
   text-transform: none;
   letter-spacing: 0;
   color: var(--text);
@@ -115,6 +134,8 @@ label.checkbox input[type="checkbox"] {
   margin: 0;
   accent-color: var(--accent);
   cursor: pointer;
+  width: 18px;
+  height: 18px;
 }
 
 input,
@@ -124,19 +145,22 @@ textarea {
   background: var(--input-bg);
   border: 1px solid var(--input-border);
   color: var(--text);
-  padding: 10px 12px;
+  /* 10/12 → 14/16 → ≥44px tap target. */
+  padding: 14px 16px;
   border-radius: 8px;
-  font-size: 14px;
+  font-size: 15px;
   outline: none;
-  transition: border-color 120ms ease, box-shadow 120ms ease;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
   font-family: inherit;
   resize: vertical;
 }
 
 textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
-  min-height: 76px;
+  font-size: 14px;
+  min-height: 88px;
 }
 
 input:focus,
@@ -149,22 +173,26 @@ textarea:focus {
 select {
   appearance: none;
   -webkit-appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23888' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%2300d9ff' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 12px center;
-  padding-right: 32px;
+  background-position: right 14px center;
+  padding-right: 36px;
 }
 
 button {
   background: var(--accent);
-  color: #fff;
+  color: #0a0a0a;
   border: 0;
-  padding: 11px 16px;
+  padding: 14px 18px;
   border-radius: 8px;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
   cursor: pointer;
-  transition: background 120ms ease, opacity 120ms ease;
+  transition:
+    background 120ms ease,
+    opacity 120ms ease,
+    box-shadow 120ms ease;
   font-family: inherit;
 }
 
@@ -175,6 +203,7 @@ button[type="submit"] {
 
 button:hover:not(:disabled) {
   background: var(--accent-hover);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 button:disabled {
@@ -185,15 +214,16 @@ button:disabled {
 button.link {
   background: transparent;
   color: var(--muted-2);
-  padding: 4px 8px;
-  font-size: 12px;
+  padding: 6px 10px;
+  font-size: 13px;
   font-weight: 500;
   border-radius: 6px;
 }
 
 button.link:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text);
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: none;
 }
 
 button.link.retry {
@@ -217,7 +247,7 @@ button.link.retry:hover:not(:disabled) {
 }
 
 .section-title {
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.8px;
   color: var(--muted-2);
@@ -237,21 +267,26 @@ button.link.retry:hover:not(:disabled) {
 }
 
 .item {
-  padding: 12px 14px;
+  padding: 14px 16px;
   background: var(--input-bg);
   border: 1px solid var(--input-border);
   border-radius: 8px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  animation: cardFadeIn 200ms ease-out;
+}
+
+.item.active {
+  border-color: rgba(0, 217, 255, 0.3);
 }
 
 .item.error {
-  border-color: rgba(248, 113, 113, 0.3);
+  border-color: rgba(255, 94, 91, 0.35);
 }
 
 .item.done {
-  border-color: rgba(52, 211, 153, 0.2);
+  border-color: rgba(94, 234, 212, 0.25);
 }
 
 .item-row {
@@ -262,7 +297,7 @@ button.link.retry:hover:not(:disabled) {
 }
 
 .item-name {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--text);
   white-space: nowrap;
@@ -278,9 +313,10 @@ button.link.retry:hover:not(:disabled) {
 
 .bar {
   width: 100%;
-  height: 4px;
-  background: #1c1c1c;
-  border-radius: 2px;
+  /* 4 → 8 with subtle glow on active. */
+  height: 8px;
+  background: #0a1218;
+  border-radius: 4px;
   overflow: hidden;
 }
 
@@ -288,7 +324,11 @@ button.link.retry:hover:not(:disabled) {
   height: 100%;
   background: var(--accent);
   transition: width 200ms ease;
-  border-radius: 2px;
+  border-radius: 4px;
+}
+
+.item.active .bar-fill {
+  box-shadow: 0 0 8px var(--accent-glow);
 }
 
 .item.done .bar-fill {
@@ -322,7 +362,7 @@ button.link.retry:hover:not(:disabled) {
 }
 
 .item-meta {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted-2);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -339,10 +379,17 @@ button.link.retry:hover:not(:disabled) {
 }
 
 .item-url {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: -2px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }

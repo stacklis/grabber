@@ -488,6 +488,7 @@ export default function Home(): React.ReactNode {
               value={text}
               onChange={(e) => setText(e.target.value)}
             />
+            <p className="hint">paste one URL per line, then hit Start</p>
           </div>
 
           <div className="row">
