@@ -1,10 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { DownloadEvent } from "@/lib/sse-events";
 import "./globals.css";
 
 const DEFAULT_OUT = "C:\\Users\\jared\\Downloads";
-const QUALITY_LABELS = {
+
+type Quality = "best" | "1080p" | "720p" | "480p" | "audio";
+type Tool = "auto" | "yt-dlp" | "gallery-dl";
+
+const QUALITY_LABELS: Record<Quality, string> = {
   best: "Best (default)",
   "1080p": "1080p MP4",
   "720p": "720p MP4",
@@ -18,66 +23,115 @@ const FOLDER_KEY = "grabber.folder";
 const TOOL_KEY = "grabber.tool";
 const PLAYLIST_KEY = "grabber.playlist";
 
-function uid() {
+type DownloadStatus = "queued" | "active" | "done" | "error";
+
+type DownloadItem = {
+  id: string;
+  url: string;
+  quality: Quality;
+  folder: string;
+  tool: Tool;
+  playlist: boolean;
+  status: DownloadStatus;
+  percent: number | null;
+  indeterminate: boolean;
+  speed: string;
+  eta: string;
+  size: string;
+  filename: string;
+  statusMsg: string;
+  error: string;
+  count?: number;
+  abort?: AbortController;
+};
+
+type HistoryEntry = {
+  id: string;
+  url: string;
+  filename: string;
+  size: string;
+  folder: string;
+  timestamp: number;
+};
+
+function uid(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-function parseUrls(text) {
+function parseUrls(text: string): string[] {
   return text
     .split(/[\n,]+/)
     .map((s) => s.trim())
     .filter((s) => /^https?:\/\//i.test(s));
 }
 
-export default function Home() {
+function isQuality(v: string): v is Quality {
+  return v === "best" || v === "1080p" || v === "720p" || v === "480p" || v === "audio";
+}
+
+function isTool(v: string): v is Tool {
+  return v === "auto" || v === "yt-dlp" || v === "gallery-dl";
+}
+
+export default function Home(): React.ReactNode {
   const [text, setText] = useState("");
-  const [quality, setQuality] = useState("best");
+  const [quality, setQuality] = useState<Quality>("best");
   const [folder, setFolder] = useState(DEFAULT_OUT);
-  const [tool, setTool] = useState("auto");
+  const [tool, setTool] = useState<Tool>("auto");
   const [playlist, setPlaylist] = useState(false);
-  const [items, setItems] = useState([]); // active + recently finished in this session
-  const [history, setHistory] = useState([]);
-  const itemsRef = useRef(items);
+  const [items, setItems] = useState<DownloadItem[]>([]);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const itemsRef = useRef<DownloadItem[]>(items);
   itemsRef.current = items;
   const autoStartedRef = useRef(false);
 
   useEffect(() => {
     try {
       const q = localStorage.getItem(QUALITY_KEY);
-      if (q && QUALITY_LABELS[q]) setQuality(q);
+      if (q && isQuality(q)) setQuality(q);
       const f = localStorage.getItem(FOLDER_KEY);
       if (f) setFolder(f);
       const t = localStorage.getItem(TOOL_KEY);
-      if (t) setTool(t);
+      if (t && isTool(t)) setTool(t);
       const p = localStorage.getItem(PLAYLIST_KEY);
       if (p === "1") setPlaylist(true);
       const h = localStorage.getItem(HISTORY_KEY);
       if (h) {
-        const parsed = JSON.parse(h);
-        if (Array.isArray(parsed)) setHistory(parsed);
+        const parsed: unknown = JSON.parse(h);
+        if (Array.isArray(parsed)) setHistory(parsed as HistoryEntry[]);
       }
-    } catch {}
+    } catch {
+      /* ignore */
+    }
   }, []);
 
   useEffect(() => {
     try {
       localStorage.setItem(QUALITY_KEY, quality);
-    } catch {}
+    } catch {
+      /* ignore */
+    }
   }, [quality]);
   useEffect(() => {
     try {
       localStorage.setItem(FOLDER_KEY, folder);
-    } catch {}
+    } catch {
+      /* ignore */
+    }
   }, [folder]);
   useEffect(() => {
     try {
       localStorage.setItem(TOOL_KEY, tool);
-    } catch {}
+    } catch {
+      /* ignore */
+    }
   }, [tool]);
   useEffect(() => {
     try {
       localStorage.setItem(PLAYLIST_KEY, playlist ? "1" : "0");
-    } catch {}
+    } catch {
+      /* ignore */
+    }
   }, [playlist]);
 
   // ?url= prefill + autostart (supports repeated url params for batch)
@@ -89,32 +143,33 @@ export default function Home() {
       if (urls.length) {
         setText(urls.join("\n"));
         autoStartedRef.current = true;
-        // wait a tick so quality/folder load from localStorage
         setTimeout(() => {
           startDownloads(urls);
         }, 50);
       }
-    } catch {}
+    } catch {
+      /* ignore */
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function updateItem(id, patch) {
-    setItems((prev) =>
-      prev.map((it) => (it.id === id ? { ...it, ...patch } : it))
-    );
+  function updateItem(id: string, patch: Partial<DownloadItem>): void {
+    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
   }
 
-  function pushHistory(entry) {
+  function pushHistory(entry: HistoryEntry): void {
     setHistory((prev) => {
       const next = [entry, ...prev].slice(0, 200);
       try {
         localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
-      } catch {}
+      } catch {
+        /* ignore */
+      }
       return next;
     });
   }
 
-  async function runOne(item) {
+  async function runOne(item: DownloadItem): Promise<void> {
     const ctrl = new AbortController();
     updateItem(item.id, { status: "active", abort: ctrl, error: "" });
     try {
@@ -148,9 +203,9 @@ export default function Home() {
         for (const evt of events) {
           const line = evt.split("\n").find((l) => l.startsWith("data: "));
           if (!line) continue;
-          let payload;
+          let payload: DownloadEvent;
           try {
-            payload = JSON.parse(line.slice(6));
+            payload = JSON.parse(line.slice(6)) as DownloadEvent;
           } catch {
             continue;
           }
@@ -168,7 +223,9 @@ export default function Home() {
             updateItem(item.id, {
               statusMsg: payload.message || "",
               filename: payload.filename || undefined,
-              tool: payload.tool || undefined,
+              tool: (payload.tool && isTool(payload.tool) ? payload.tool : undefined) as
+                | Tool
+                | undefined,
             });
           } else if (payload.type === "done") {
             updateItem(item.id, {
@@ -201,20 +258,22 @@ export default function Home() {
       if (cur && cur.status === "active") {
         updateItem(item.id, { status: "error", error: "Stream ended unexpectedly" });
       }
-    } catch (err) {
-      if (err.name === "AbortError") {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const name = err instanceof Error ? err.name : "";
+      if (name === "AbortError") {
         updateItem(item.id, { status: "error", error: "Cancelled" });
       } else {
         updateItem(item.id, {
           status: "error",
-          error: err.message || "Error",
+          error: msg || "Error",
         });
       }
     }
   }
 
-  function startDownloads(urls) {
-    const newItems = urls.map((u) => ({
+  function startDownloads(urls: string[]): void {
+    const newItems: DownloadItem[] = urls.map((u) => ({
       id: uid(),
       url: u,
       quality,
@@ -233,11 +292,11 @@ export default function Home() {
     }));
     setItems((prev) => [...newItems, ...prev]);
     for (const it of newItems) {
-      runOne(it);
+      void runOne(it);
     }
   }
 
-  function onSubmit(e) {
+  function onSubmit(e: React.FormEvent<HTMLFormElement>): void {
     e.preventDefault();
     const urls = parseUrls(text);
     if (!urls.length) return;
@@ -245,31 +304,35 @@ export default function Home() {
     setText("");
   }
 
-  function onRetry(item) {
-    runOne({ ...item });
+  function onRetry(item: DownloadItem): void {
+    void runOne({ ...item });
   }
 
-  function onCancel(item) {
+  function onCancel(item: DownloadItem): void {
     if (item.abort) {
       try {
         item.abort.abort();
-      } catch {}
+      } catch {
+        /* ignore */
+      }
     }
   }
 
-  function clearFinished() {
+  function clearFinished(): void {
     setItems((prev) => prev.filter((it) => it.status === "active" || it.status === "queued"));
   }
 
-  function clearHistory() {
+  function clearHistory(): void {
     setHistory([]);
     try {
       localStorage.removeItem(HISTORY_KEY);
-    } catch {}
+    } catch {
+      /* ignore */
+    }
   }
 
   const activeCount = items.filter(
-    (i) => i.status === "active" || i.status === "queued"
+    (i) => i.status === "active" || i.status === "queued",
   ).length;
 
   return (
@@ -298,11 +361,14 @@ export default function Home() {
               <select
                 id="quality"
                 value={quality}
-                onChange={(e) => setQuality(e.target.value)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (isQuality(v)) setQuality(v);
+                }}
               >
-                {Object.entries(QUALITY_LABELS).map(([v, l]) => (
+                {(Object.keys(QUALITY_LABELS) as Quality[]).map((v) => (
                   <option key={v} value={v}>
-                    {l}
+                    {QUALITY_LABELS[v]}
                   </option>
                 ))}
               </select>
@@ -312,7 +378,10 @@ export default function Home() {
               <select
                 id="tool"
                 value={tool}
-                onChange={(e) => setTool(e.target.value)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (isTool(v)) setTool(v);
+                }}
               >
                 <option value="auto">Auto detect</option>
                 <option value="yt-dlp">yt-dlp (video)</option>
@@ -368,11 +437,7 @@ export default function Home() {
                   </div>
                   <div className="item-actions">
                     {it.status === "active" && (
-                      <button
-                        type="button"
-                        className="link"
-                        onClick={() => onCancel(it)}
-                      >
+                      <button type="button" className="link" onClick={() => onCancel(it)}>
                         Cancel
                       </button>
                     )}
@@ -390,17 +455,15 @@ export default function Home() {
                 <div className="bar">
                   <div
                     className={`bar-fill ${
-                      it.indeterminate && it.status === "active"
-                        ? "indeterminate"
-                        : ""
+                      it.indeterminate && it.status === "active" ? "indeterminate" : ""
                     }`}
                     style={{
                       width:
                         it.status === "done"
                           ? "100%"
                           : it.indeterminate
-                          ? "100%"
-                          : `${it.percent || 0}%`,
+                            ? "100%"
+                            : `${it.percent ?? 0}%`,
                     }}
                   />
                 </div>
@@ -417,8 +480,8 @@ export default function Home() {
                             ? `${it.count} files`
                             : "downloading…"
                           : it.percent
-                          ? `${it.percent.toFixed(1)}%`
-                          : it.statusMsg || "starting…"}
+                            ? `${it.percent.toFixed(1)}%`
+                            : it.statusMsg || "starting…"}
                       </span>
                       {it.speed && <span className="muted"> · {it.speed}</span>}
                       {it.eta && <span className="muted"> · ETA {it.eta}</span>}
@@ -454,9 +517,7 @@ export default function Home() {
                 <div className="item-meta">
                   {h.size && <span className="muted">{h.size}</span>}
                   {h.size && <span className="muted"> · </span>}
-                  <span className="muted">
-                    {new Date(h.timestamp).toLocaleString()}
-                  </span>
+                  <span className="muted">{new Date(h.timestamp).toLocaleString()}</span>
                   {h.folder && (
                     <>
                       <span className="muted"> · </span>
